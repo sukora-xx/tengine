@@ -9,6 +9,11 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
+#if (NGX_HTTP_UPSTREAM_CHECK)
+
+#include "ngx_http_upstream_check_module.h"
+
+#endif
 
 typedef struct {
     ngx_uint_t                        *conns;
@@ -310,6 +315,7 @@ ngx_http_upstream_get_least_conn_peer(ngx_peer_connection_t *pc, void *data)
     pc->sockaddr = best->sockaddr;
     pc->socklen = best->socklen;
     pc->name = &best->name;
+    pc->host = &best->host;
 
     lcp->rrp.current = p;
 
@@ -318,10 +324,6 @@ ngx_http_upstream_get_least_conn_peer(ngx_peer_connection_t *pc, void *data)
 
     lcp->rrp.tried[n] |= m;
     lcp->conns[p]++;
-
-    if (pc->tries == 1 && peers->next) {
-        pc->tries += peers->next->number;
-    }
 
     return NGX_OK;
 
@@ -334,7 +336,6 @@ failed:
         lcp->conns += peers->number;
 
         lcp->rrp.peers = peers->next;
-        pc->tries = lcp->rrp.peers->number;
 
         n = (lcp->rrp.peers->number + (8 * sizeof(uintptr_t) - 1))
                 / (8 * sizeof(uintptr_t));

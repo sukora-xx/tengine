@@ -11,6 +11,15 @@
 #include <ngx_channel.h>
 
 
+typedef struct {
+    int     signo;
+    char   *signame;
+    char   *name;
+    void  (*handler)(int signo);
+} ngx_signal_t;
+
+
+
 static void ngx_execute_proc(ngx_cycle_t *cycle, void *data);
 static void ngx_signal_handler(int signo);
 static void ngx_process_get_status(void);
@@ -282,9 +291,14 @@ ngx_init_signals(ngx_log_t *log)
         sa.sa_handler = sig->handler;
         sigemptyset(&sa.sa_mask);
         if (sigaction(sig->signo, &sa, NULL) == -1) {
+#if (NGX_VALGRIND)
+            ngx_log_error(NGX_LOG_ALERT, log, ngx_errno,
+                          "sigaction(%s) failed, ignored", sig->signame);
+#else
             ngx_log_error(NGX_LOG_EMERG, log, ngx_errno,
                           "sigaction(%s) failed", sig->signame);
             return NGX_ERROR;
+#endif
         }
     }
 

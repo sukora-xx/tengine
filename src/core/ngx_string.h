@@ -167,6 +167,7 @@ ngx_int_t ngx_rstrncmp(u_char *s1, u_char *s2, size_t n);
 ngx_int_t ngx_rstrncasecmp(u_char *s1, u_char *s2, size_t n);
 ngx_int_t ngx_memn2cmp(u_char *s1, u_char *s2, size_t n1, size_t n2);
 ngx_int_t ngx_dns_strcmp(u_char *s1, u_char *s2);
+ngx_int_t ngx_filename_cmp(u_char *s1, u_char *s2, size_t n);
 
 ngx_int_t ngx_atoi(u_char *line, size_t n);
 long long ngx_atoll(u_char *line, size_t n);
@@ -209,6 +210,7 @@ uintptr_t ngx_escape_uri(u_char *dst, u_char *src, size_t size,
     ngx_uint_t type);
 void ngx_unescape_uri(u_char **dst, u_char **src, size_t size, ngx_uint_t type);
 uintptr_t ngx_escape_html(u_char *dst, u_char *src, size_t size);
+uintptr_t ngx_escape_json(u_char *dst, u_char *src, size_t size);
 
 
 typedef struct {

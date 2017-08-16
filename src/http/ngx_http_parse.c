@@ -212,14 +212,17 @@ ngx_http_parse_request_line(ngx_http_request_t *r, ngx_buf_t *b)
                 case 5:
                     if (ngx_str5cmp(m, 'M', 'K', 'C', 'O', 'L')) {
                         r->method = NGX_HTTP_MKCOL;
+                        break;
                     }
 
                     if (ngx_str5cmp(m, 'P', 'A', 'T', 'C', 'H')) {
                         r->method = NGX_HTTP_PATCH;
+                        break;
                     }
 
                     if (ngx_str5cmp(m, 'T', 'R', 'A', 'C', 'E')) {
                         r->method = NGX_HTTP_TRACE;
+                        break;
                     }
 
                     break;
@@ -883,6 +886,19 @@ ngx_http_parse_header_line(ngx_http_request_t *r, ngx_buf_t *b,
                     break;
                 }
 
+                if (ch == '_') {
+                    if (allow_underscores) {
+                        hash = ngx_hash(0, ch);
+                        r->lowcase_header[0] = ch;
+                        i = 1;
+
+                    } else {
+                        r->invalid_header = 1;
+                    }
+
+                    break;
+                }
+
                 if (ch == '\0') {
                     return NGX_HTTP_PARSE_INVALID_HEADER;
                 }
@@ -1258,8 +1274,8 @@ ngx_http_parse_complex_uri(ngx_http_request_t *r, ngx_uint_t merge_slashes)
          * the line feed
          */
 
-        ngx_log_debug4(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                       "s:%d in:'%Xd:%c', out:'%c'", state, ch, ch, *u);
+        ngx_log_debug3(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "s:%d in:'%Xd:%c'", state, ch, ch);
 
         switch (state) {
 
@@ -1271,7 +1287,7 @@ ngx_http_parse_complex_uri(ngx_http_request_t *r, ngx_uint_t merge_slashes)
                 break;
             }
 
-            switch(ch) {
+            switch (ch) {
 #if (NGX_WIN32)
             case '\\':
                 if (u - 2 >= r->uri.data
@@ -1341,7 +1357,7 @@ ngx_http_parse_complex_uri(ngx_http_request_t *r, ngx_uint_t merge_slashes)
                 break;
             }
 
-            switch(ch) {
+            switch (ch) {
 #if (NGX_WIN32)
             case '\\':
                 break;
@@ -1384,7 +1400,7 @@ ngx_http_parse_complex_uri(ngx_http_request_t *r, ngx_uint_t merge_slashes)
                 break;
             }
 
-            switch(ch) {
+            switch (ch) {
 #if (NGX_WIN32)
             case '\\':
 #endif
@@ -1425,7 +1441,7 @@ ngx_http_parse_complex_uri(ngx_http_request_t *r, ngx_uint_t merge_slashes)
                 break;
             }
 
-            switch(ch) {
+            switch (ch) {
 #if (NGX_WIN32)
             case '\\':
 #endif
@@ -1777,23 +1793,32 @@ ngx_int_t
 ngx_http_parse_unsafe_uri(ngx_http_request_t *r, ngx_str_t *uri,
     ngx_str_t *args, ngx_uint_t *flags)
 {
-    u_char  ch, *p;
-    size_t  len;
+    u_char      ch, *p, *src, *dst;
+    size_t      len;
+    ngx_uint_t  quoted;
 
     len = uri->len;
     p = uri->data;
+    quoted = 0;
 
     if (len == 0 || p[0] == '?') {
         goto unsafe;
     }
 
-    if (p[0] == '.' && len == 3 && p[1] == '.' && (ngx_path_separator(p[2]))) {
+    if (p[0] == '.' && len > 1 && p[1] == '.'
+        && (len == 2 || ngx_path_separator(p[2])))
+    {
         goto unsafe;
     }
 
     for ( /* void */ ; len; len--) {
 
         ch = *p++;
+
+        if (ch == '%') {
+            quoted = 1;
+            continue;
+        }
 
         if (usual[ch >> 5] & (1 << (ch & 0x1f))) {
             continue;
@@ -1804,7 +1829,7 @@ ngx_http_parse_unsafe_uri(ngx_http_request_t *r, ngx_str_t *uri,
             args->data = p;
             uri->len -= len;
 
-            return NGX_OK;
+            break;
         }
 
         if (ch == '\0') {
@@ -1813,10 +1838,62 @@ ngx_http_parse_unsafe_uri(ngx_http_request_t *r, ngx_str_t *uri,
 
         if (ngx_path_separator(ch) && len > 2) {
 
-            /* detect "/../" */
+            /* detect "/../" and "/.." */
 
-            if (p[0] == '.' && p[1] == '.' && ngx_path_separator(p[2])) {
+            if (p[0] == '.' && p[1] == '.'
+                && (len == 3 || ngx_path_separator(p[2])))
+            {
                 goto unsafe;
+            }
+        }
+    }
+
+    if (quoted) {
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "escaped URI: \"%V\"", uri);
+
+        src = uri->data;
+
+        dst = ngx_pnalloc(r->pool, uri->len);
+        if (dst == NULL) {
+            return NGX_ERROR;
+        }
+
+        uri->data = dst;
+
+        ngx_unescape_uri(&dst, &src, uri->len, 0);
+
+        uri->len = dst - uri->data;
+
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "unescaped URI: \"%V\"", uri);
+
+        len = uri->len;
+        p = uri->data;
+
+        if (p[0] == '.' && len > 1 && p[1] == '.'
+            && (len == 2 || ngx_path_separator(p[2])))
+        {
+            goto unsafe;
+        }
+
+        for ( /* void */ ; len; len--) {
+
+            ch = *p++;
+
+            if (ch == '\0') {
+                goto unsafe;
+            }
+
+            if (ngx_path_separator(ch) && len > 2) {
+
+                /* detect "/../" and "/.." */
+
+                if (p[0] == '.' && p[1] == '.'
+                    && (len == 3 || ngx_path_separator(p[2])))
+                {
+                    goto unsafe;
+                }
             }
         }
     }
@@ -1901,6 +1978,57 @@ ngx_http_parse_multi_header_lines(ngx_array_t *headers, ngx_str_t *name,
 
             while (start < end && *start == ' ') { start++; }
         }
+    }
+
+    return NGX_DECLINED;
+}
+
+
+ngx_int_t
+ngx_http_parse_set_cookie_lines(ngx_array_t *headers, ngx_str_t *name,
+    ngx_str_t *value)
+{
+    ngx_uint_t         i;
+    u_char            *start, *last, *end;
+    ngx_table_elt_t  **h;
+
+    h = headers->elts;
+
+    for (i = 0; i < headers->nelts; i++) {
+
+        ngx_log_debug2(NGX_LOG_DEBUG_HTTP, headers->pool->log, 0,
+                       "parse header: \"%V: %V\"", &h[i]->key, &h[i]->value);
+
+        if (name->len >= h[i]->value.len) {
+            continue;
+        }
+
+        start = h[i]->value.data;
+        end = h[i]->value.data + h[i]->value.len;
+
+        if (ngx_strncasecmp(start, name->data, name->len) != 0) {
+            continue;
+        }
+
+        for (start += name->len; start < end && *start == ' '; start++) {
+            /* void */
+        }
+
+        if (start == end || *start++ != '=') {
+            /* the invalid header value */
+            continue;
+        }
+
+        while (start < end && *start == ' ') { start++; }
+
+        for (last = start; last < end && *last != ';'; last++) {
+            /* void */
+        }
+
+        value->len = last - start;
+        value->data = start;
+
+        return i;
     }
 
     return NGX_DECLINED;
@@ -2082,6 +2210,10 @@ ngx_http_parse_chunked(ngx_http_request_t *r, ngx_buf_t *b,
             goto invalid;
 
         case sw_chunk_size:
+            if (ctx->size > NGX_MAX_OFF_T_VALUE / 16) {
+                goto invalid;
+            }
+
             if (ch >= '0' && ch <= '9') {
                 ctx->size = ctx->size * 16 + (ch - '0');
                 break;
@@ -2231,14 +2363,19 @@ data:
     ctx->state = state;
     b->pos = pos;
 
+    if (ctx->size > NGX_MAX_OFF_T_VALUE - 5) {
+        goto invalid;
+    }
+
     switch (state) {
 
     case sw_chunk_start:
         ctx->length = 3 /* "0" LF LF */;
         break;
     case sw_chunk_size:
-        ctx->length = 2 /* LF LF */
-                      + (ctx->size ? ctx->size + 4 /* LF "0" LF LF */ : 0);
+        ctx->length = 1 /* LF */
+                      + (ctx->size ? ctx->size + 4 /* LF "0" LF LF */
+                                   : 1 /* LF */);
         break;
     case sw_chunk_extension:
     case sw_chunk_extension_almost_done:
@@ -2282,4 +2419,131 @@ done:
 invalid:
 
     return NGX_ERROR;
+}
+
+
+ngx_int_t
+ngx_http_chunked_output_filter(ngx_http_request_t *r, ngx_chain_t *in,
+    ngx_chain_t **output, ngx_chain_t **free, ngx_buf_tag_t tag)
+{
+    u_char      *chunk;
+    off_t        size;
+    ngx_buf_t   *b;
+    ngx_chain_t *out, *cl, *tl, **ll;
+
+    if (in == NULL || !r->headers_in.chunked) {
+        *output = in;
+        return NGX_OK;
+    }
+
+    out = NULL;
+    ll = &out;
+
+    size = 0;
+    cl = in;
+
+    for ( ;; ) {
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "http output chunk: %d", ngx_buf_size(cl->buf));
+
+        size += ngx_buf_size(cl->buf);
+
+        if (cl->buf->flush
+            || cl->buf->sync
+            || ngx_buf_size(cl->buf) > 0)
+        {
+            tl = ngx_alloc_chain_link(r->pool);
+            if (tl == NULL) {
+                return NGX_ERROR;
+            }
+
+            tl->buf = cl->buf;
+            *ll = tl;
+            ll = &tl->next;
+        }
+
+        if (cl->next == NULL) {
+            break;
+        }
+
+        cl = cl->next;
+    }
+
+    if (size) {
+        tl = ngx_chain_get_free_buf(r->pool, free);
+        if (tl == NULL) {
+            return NGX_ERROR;
+        }
+
+        b = tl->buf;
+        chunk = b->start;
+
+        if (chunk == NULL) {
+            /* the "0000000000000000" is 64-bit hexadecimal string */
+
+            chunk = ngx_palloc(r->pool, sizeof("0000000000000000" CRLF) - 1);
+            if (chunk == NULL) {
+                return NGX_ERROR;
+            }
+
+            b->start = chunk;
+            b->end = chunk + sizeof("0000000000000000" CRLF) - 1;
+        }
+
+        b->tag = tag;
+        b->memory = 0;
+        b->temporary = 1;
+        b->pos = chunk;
+        b->last = ngx_sprintf(chunk, "%xO" CRLF, size);
+
+        tl->next = out;
+        out = tl;
+    }
+
+    if (cl->buf->last_buf) {
+        tl = ngx_chain_get_free_buf(r->pool, free);
+        if (tl == NULL) {
+            return NGX_ERROR;
+        }
+
+        b = tl->buf;
+
+        b->tag = tag;
+        b->memory = 0;
+        b->temporary = 1;
+        b->last_buf = 1;
+        b->pos = (u_char *) CRLF "0" CRLF CRLF;
+        b->last = b->pos + 7;
+
+        cl->buf->last_buf = 0;
+
+        *ll = tl;
+
+        if (size == 0) {
+            b->pos += 2;
+        }
+
+    } else if (size > 0) {
+        tl = ngx_chain_get_free_buf(r->pool, free);
+        if (tl == NULL) {
+            return NGX_ERROR;
+        }
+
+        b = tl->buf;
+
+        b->tag = tag;
+        b->temporary = 0;
+        b->memory = 1;
+        b->pos = (u_char *) CRLF;
+        b->last = b->pos + 2;
+
+        *ll = tl;
+
+    } else {
+        *ll = NULL;
+    }
+
+    *output = out;
+
+    return NGX_OK;
 }

@@ -1,6 +1,5 @@
-
 /*
- * Copyright (C) 2010-2013 Alibaba Group Holding Limited
+ * Copyright (C) 2010-2015 Alibaba Group Holding Limited
  */
 
 
@@ -137,9 +136,6 @@ static ngx_uint_t       ngx_procs_max_module;
 static ngx_cycle_t      ngx_procs_exit_cycle;
 static ngx_log_t        ngx_procs_exit_log;
 static ngx_open_file_t  ngx_procs_exit_log_file;
-#if (NGX_SYSLOG)
-static ngx_syslog_t     ngx_procs_exit_log_syslog;
-#endif
 
 
 static char *
@@ -717,12 +713,6 @@ ngx_procs_process_exit(ngx_cycle_t *cycle, ngx_proc_module_t *module)
     ngx_uint_t         i;
     ngx_connection_t  *c;
 
-#if (NGX_THREADS)
-    ngx_terminate = 1;
-
-    ngx_wakeup_worker_threads(cycle);
-#endif
-
     if (module->exit) {
         module->exit(cycle);
     }
@@ -761,20 +751,13 @@ ngx_procs_process_exit(ngx_cycle_t *cycle, ngx_proc_module_t *module)
     ngx_procs_exit_log = *ngx_cycle->log;
     ngx_procs_exit_log.file = &ngx_procs_exit_log_file;
 
-#if (NGX_SYSLOG)
-    if (ngx_procs_exit_log.syslog != NULL) {
-        ngx_procs_exit_log_syslog = *ngx_procs_exit_log.syslog;
-        ngx_procs_exit_log.syslog = &ngx_procs_exit_log_syslog;
-    }
-#endif
-
     ngx_procs_exit_cycle.log = &ngx_procs_exit_log;
     ngx_cycle = &ngx_procs_exit_cycle;
 
-    ngx_destroy_pool(cycle->pool);
-
     ngx_log_error(NGX_LOG_NOTICE, ngx_cycle->log, 0, "process %V exit",
                   &module->name);
+
+    ngx_destroy_pool(cycle->pool);
 
     exit(0);
 }

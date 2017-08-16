@@ -3,7 +3,7 @@
 # Copyright (C) Nginx, Inc.
 
 
-LINK="\$(CC)"
+LINK=${LINK:-"\$(CC)"}
 
 ngx_include_opt="-I "
 ngx_compile_opt="-c"
@@ -41,6 +41,29 @@ if test -n "$CFLAGS"; then
             # Compaq C V6.5-207
 
             ngx_include_opt="-I"
+        ;;
+
+        sunc)
+
+            case "$NGX_MACHINE" in
+
+                i86pc)
+                    NGX_AUX=" src/os/unix/ngx_sunpro_x86.il"
+                ;;
+
+                sun4u | sun4v)
+                    NGX_AUX=" src/os/unix/ngx_sunpro_sparc64.il"
+                ;;
+
+            esac
+
+            case $CPU in
+
+                amd64)
+                    NGX_AUX=" src/os/unix/ngx_sunpro_amd64.il"
+                ;;
+
+            esac
         ;;
 
     esac
@@ -195,6 +218,16 @@ if [ "$NGX_PLATFORM" != win32 ]; then
                       if (sizeof(struct test_s) != (sizeof(char) + sizeof(int)))
                           return 1;"
     . auto/feature
+
+    ngx_feature="gcc builtin 64 bit byteswap"
+    ngx_feature_name="NGX_HAVE_GCC_BSWAP64"
+    ngx_feature_run=no
+    ngx_feature_incs=
+    ngx_feature_path=
+    ngx_feature_libs=
+    ngx_feature_test="__builtin_bswap64(0)"
+    . auto/feature
+
 
 #    ngx_feature="inline"
 #    ngx_feature_name=

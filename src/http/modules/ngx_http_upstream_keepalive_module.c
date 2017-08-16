@@ -84,7 +84,7 @@ static ngx_command_t  ngx_http_upstream_keepalive_commands[] = {
     { ngx_string("keepalive"),
       NGX_HTTP_UPS_CONF|NGX_CONF_TAKE12,
       ngx_http_upstream_keepalive,
-      0,
+      NGX_HTTP_SRV_CONF_OFFSET,
       0,
       NULL },
 
@@ -258,6 +258,7 @@ ngx_http_upstream_get_keepalive_peer(ngx_peer_connection_t *pc, void *data)
                            "get keepalive peer: using connection %p", c);
 
             c->idle = 0;
+            c->sent = 0;
             c->log = pc->log;
             c->read->log = pc->log;
             c->write->log = pc->log;
@@ -412,7 +413,7 @@ ngx_http_upstream_keepalive_close_handler(ngx_event_t *ev)
     n = recv(c->fd, buf, 1, MSG_PEEK);
 
     if (n == -1 && ngx_socket_errno == NGX_EAGAIN) {
-        /* stale event */
+        ev->ready = 0;
 
         if (ngx_handle_read_event(c->read, 0) != NGX_OK) {
             goto close;
@@ -508,16 +509,13 @@ static char *
 ngx_http_upstream_keepalive(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_http_upstream_srv_conf_t            *uscf;
-    ngx_http_upstream_keepalive_srv_conf_t  *kcf;
+    ngx_http_upstream_keepalive_srv_conf_t  *kcf = conf;
 
     ngx_int_t    n;
     ngx_str_t   *value;
     ngx_uint_t   i;
 
     uscf = ngx_http_conf_get_module_srv_conf(cf, ngx_http_upstream_module);
-
-    kcf = ngx_http_conf_upstream_srv_conf(uscf,
-                                          ngx_http_upstream_keepalive_module);
 
     if (kcf->original_init_upstream) {
         return "is duplicate";

@@ -370,7 +370,7 @@ ngx_feature_test="setsockopt(0, IPPROTO_TCP, TCP_DEFER_ACCEPT, NULL, 0)"
 . auto/feature
 
 
-ngx_feature="TCP_KEEPIDLE, TCP_KEEPINTVL, TCP_KEEPCNT"
+ngx_feature="TCP_KEEPIDLE"
 ngx_feature_name="NGX_HAVE_KEEPALIVE_TUNABLE"
 ngx_feature_run=no
 ngx_feature_incs="#include <sys/socket.h>
@@ -381,6 +381,18 @@ ngx_feature_libs=
 ngx_feature_test="setsockopt(0, IPPROTO_TCP, TCP_KEEPIDLE, NULL, 0);
                   setsockopt(0, IPPROTO_TCP, TCP_KEEPINTVL, NULL, 0);
                   setsockopt(0, IPPROTO_TCP, TCP_KEEPCNT, NULL, 0)"
+. auto/feature
+
+
+ngx_feature="TCP_FASTOPEN"
+ngx_feature_name="NGX_HAVE_TCP_FASTOPEN"
+ngx_feature_run=no
+ngx_feature_incs="#include <sys/socket.h>
+                  #include <netinet/in.h>
+                  #include <netinet/tcp.h>"
+ngx_feature_path=
+ngx_feature_libs=
+ngx_feature_test="setsockopt(0, IPPROTO_TCP, TCP_FASTOPEN, NULL, 0)"
 . auto/feature
 
 
@@ -457,6 +469,28 @@ END
            exit 1
         fi
     fi
+else
+
+    ngx_feature="eventfd()"
+    ngx_feature_name="NGX_HAVE_EVENTFD"
+    ngx_feature_run=no
+    ngx_feature_incs="#include <sys/eventfd.h>"
+    ngx_feature_path=
+    ngx_feature_libs=
+    ngx_feature_test="(void) eventfd(0, 0)"
+    . auto/feature
+
+    if [ $ngx_found = yes ]; then
+        have=NGX_HAVE_SYS_EVENTFD_H . auto/have
+    fi
+
+    if [ $ngx_found = no ]; then
+
+        ngx_feature="eventfd() (SYS_eventfd)"
+        ngx_feature_incs="#include <sys/syscall.h>"
+        ngx_feature_test="int n = SYS_eventfd"
+        . auto/feature
+    fi
 fi
 
 
@@ -517,6 +551,7 @@ ngx_param=NGX_OFF_T_LEN; ngx_value=$ngx_max_len; . auto/types/value
 ngx_type="time_t"; . auto/types/sizeof
 ngx_param=NGX_TIME_T_SIZE; ngx_value=$ngx_size; . auto/types/value
 ngx_param=NGX_TIME_T_LEN; ngx_value=$ngx_max_len; . auto/types/value
+ngx_param=NGX_MAX_TIME_T_VALUE; ngx_value=$ngx_max_value; . auto/types/value
 
 
 # syscalls, libc calls and some features
@@ -534,12 +569,6 @@ if [ $NGX_IPV6 = YES ]; then
     ngx_feature_test="struct sockaddr_in6  sin6;
                       sin6.sin6_family = AF_INET6;"
     . auto/feature
-fi
-
-
-if [ $NGX_SYSLOG = YES ]; then
-    CORE_DEPS="$CORE_DEPS $SYSLOG_DEPS"
-    CORE_SRCS="$CORE_SRCS $SYSLOG_SRCS"
 fi
 
 
@@ -847,6 +876,13 @@ ngx_feature_test="struct stat sb;
                   openat(AT_FDCWD, \".\", O_RDONLY|O_NOFOLLOW);
                   fstatat(AT_FDCWD, \".\", &sb, AT_SYMLINK_NOFOLLOW);"
 . auto/feature
+
+
+if [ -f "/etc/resolv.conf" ]; then
+    have=NGX_RESOLVER_FILE
+    value=\"/etc/resolv.conf\"
+    . auto/define
+fi
 
 
 ngx_feature="getaddrinfo()"

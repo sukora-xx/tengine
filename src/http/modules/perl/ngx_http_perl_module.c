@@ -421,7 +421,7 @@ ngx_http_perl_ssi(ngx_http_request_t *r, ngx_http_ssi_ctx_t *ssi_ctx,
             return NGX_ERROR;
         }
 
-        asv[0] = (SV *) i;
+        asv[0] = (SV *) (uintptr_t) i;
 
         for (i = 0; args[i]; i++) {
             asv[i + 1] = newSVpvn((char *) args[i]->data, args[i]->len);
@@ -577,7 +577,7 @@ ngx_http_perl_create_interpreter(ngx_conf_t *cf,
 
     n = (pmcf->modules != NGX_CONF_UNSET_PTR) ? pmcf->modules->nelts * 2 : 0;
 
-    embedding = ngx_palloc(cf->pool, (4 + n) * sizeof(char *));
+    embedding = ngx_palloc(cf->pool, (5 + n) * sizeof(char *));
     if (embedding == NULL) {
         goto fail;
     }
@@ -595,6 +595,7 @@ ngx_http_perl_create_interpreter(ngx_conf_t *cf,
     embedding[n++] = "-Mnginx";
     embedding[n++] = "-e";
     embedding[n++] = "0";
+    embedding[n] = NULL;
 
     n = perl_parse(perl, ngx_http_perl_xs_init, n, embedding, NULL);
 
@@ -692,7 +693,7 @@ ngx_http_perl_call_handler(pTHX_ ngx_http_request_t *r, HV *nginx, SV *sub,
     if (args) {
         EXTEND(sp, (intptr_t) args[0]);
 
-        for (i = 1; i <= (ngx_uint_t) args[0]; i++) {
+        for (i = 1; i <= (uintptr_t) args[0]; i++) {
             PUSHs(sv_2mortal(args[i]));
         }
     }

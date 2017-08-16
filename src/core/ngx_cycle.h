@@ -41,6 +41,8 @@ struct ngx_cycle_s {
     ngx_log_t                *log;
     ngx_log_t                 new_log;
 
+    ngx_uint_t                log_use_stderr;  /* unsigned  log_use_stderr:1; */
+
     ngx_connection_t        **files;
     ngx_connection_t         *free_connections;
     ngx_uint_t                free_connection_n;
@@ -103,17 +105,24 @@ typedef struct {
      ngx_array_t              env;
      char                   **environment;
 
-#if (NGX_THREADS)
+#if (NGX_FORCE_EXIT)
+     time_t                   force_exit_time;
+#endif
+
+#if (NGX_OLD_THREADS)
      ngx_int_t                worker_threads;
      size_t                   thread_stack_size;
 #endif
 
 } ngx_core_conf_t;
 
+#if (NGX_OLD_THREADS)
 
 typedef struct {
      ngx_pool_t              *pool;   /* pcre's malloc() pool */
 } ngx_core_tls_t;
+
+#endif
 
 
 #define ngx_is_init_cycle(cycle)  (cycle->conf_ctx == NULL)
@@ -141,7 +150,7 @@ extern ngx_uint_t             ngx_test_config;
 extern ngx_uint_t             ngx_show_modules;
 extern ngx_uint_t             ngx_show_directives;
 extern ngx_uint_t             ngx_quiet_mode;
-#if (NGX_THREADS)
+#if (NGX_OLD_THREADS)
 extern ngx_tls_key_t          ngx_core_tls_key;
 #endif
 

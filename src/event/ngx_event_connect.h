@@ -40,8 +40,10 @@ struct ngx_peer_connection_s {
     struct sockaddr                 *sockaddr;
     socklen_t                        socklen;
     ngx_str_t                       *name;
+    ngx_str_t                       *host;
 
     ngx_uint_t                       tries;
+    ngx_msec_t                       start_time;
 
     ngx_event_get_peer_pt            get;
     ngx_event_free_peer_pt           free;
@@ -52,10 +54,6 @@ struct ngx_peer_connection_s {
     ngx_event_save_peer_session_pt   save_session;
 #endif
 
-#if (NGX_THREADS)
-    ngx_atomic_t                    *lock;
-#endif
-
     ngx_addr_t                      *local;
 
     int                              rcvbuf;
@@ -63,6 +61,8 @@ struct ngx_peer_connection_s {
     ngx_log_t                       *log;
 
     unsigned                         cached:1;
+
+    unsigned                         resolved:2;
 
                                      /* ngx_connection_log_error_e */
     unsigned                         log_error:2;

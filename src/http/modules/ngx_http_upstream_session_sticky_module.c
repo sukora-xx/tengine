@@ -73,6 +73,10 @@ typedef struct {
     ngx_http_upstream_rr_peer_data_t    rrp;
     ngx_http_request_t                 *r;
 
+#if (NGX_HTTP_SSL)
+    ngx_ssl_session_t                  *ssl_session;
+#endif
+
     ngx_event_get_peer_pt               get_rr_peer;
 
     ngx_http_upstream_ss_srv_conf_t    *sscf;
@@ -111,6 +115,16 @@ static ngx_int_t ngx_http_upstream_session_sticky_init_upstream(ngx_conf_t *cf,
     ngx_http_upstream_srv_conf_t *us);
 static ngx_int_t ngx_http_upstream_session_sticky_set_sid(ngx_conf_t *cf,
     ngx_http_ss_server_t *s);
+
+#if (NGX_HTTP_SSL)
+
+static ngx_int_t ngx_http_upstream_session_sticky_set_peer_session(
+    ngx_peer_connection_t *pc, void *data);
+static void ngx_http_upstream_session_sticky_save_peer_session(
+    ngx_peer_connection_t *pc, void *data);
+
+#endif
+
 
 static ngx_conf_deprecated_t ngx_conf_deprecated_session_sticky_header = {
     ngx_conf_deprecated, "session_sticky_header", "session_sticky_hide_cookie"
@@ -234,6 +248,13 @@ ngx_http_upstream_session_sticky_init_peer(ngx_http_request_t *r,
     r->upstream->peer.data = sspd;
     r->upstream->peer.get = ngx_http_upstream_session_sticky_get_peer;
 
+#if (NGX_HTTP_SSL)
+    r->upstream->peer.set_session =
+                            ngx_http_upstream_session_sticky_set_peer_session;
+    r->upstream->peer.save_session =
+                            ngx_http_upstream_session_sticky_save_peer_session;
+#endif
+
     return NGX_OK;
 }
 
@@ -278,7 +299,7 @@ ngx_http_session_sticky_get_cookie(ngx_http_request_t *r)
 {
     time_t                           now;
     u_char                          *p, *v, *vv, *st, *last, *end;
-    ngx_int_t                        diff, delimiter, legal, rc;
+    ngx_int_t                        diff, delimiter, legal;
     ngx_str_t                       *cookie;
     ngx_uint_t                       i;
     ngx_table_elt_t                **cookies;
@@ -512,11 +533,10 @@ finish:
         & (NGX_HTTP_SESSION_STICKY_PREFIX | NGX_HTTP_SESSION_STICKY_INDIRECT))
     {
         cookie->len -= (end - st);
+
         if (cookie->len == 0) {
-            rc = ngx_list_delete(&r->headers_in.headers, cookies[i]);
-            if (rc != NGX_OK) {
-                return NGX_ERROR;
-            }
+            cookies[i]->hash = 0;
+            return NGX_OK;
         }
 
         while (end < last) {
@@ -954,9 +974,9 @@ ngx_http_session_sticky_insert(ngx_http_request_t *r)
     set_cookie->value.len = ctx->sscf->cookie.len
                           + sizeof("=") - 1
                           + ctx->sid.len
-                          + sizeof(";Domain=") - 1
+                          + sizeof("; Domain=") - 1
                           + ctx->sscf->domain.len
-                          + sizeof(";Path=") - 1
+                          + sizeof("; Path=") - 1
                           + ctx->sscf->path.len;
 
     if (ctx->sscf->maxidle != NGX_CONF_UNSET) {
@@ -966,8 +986,10 @@ ngx_http_session_sticky_insert(ngx_http_request_t *r)
                               + 2; /* '|' and '|' */
     } else {
         set_cookie->value.len = set_cookie->value.len
-                              + sizeof(";Max-Age=") - 1
-                              + ctx->sscf->maxage.len;
+                              + sizeof("; Max-Age=") - 1
+                              + ctx->sscf->maxage.len
+                              + sizeof("; Expires=") - 1
+                              + sizeof("Xxx, 00-Xxx-00 00:00:00 GMT") - 1;
     }
 
     p = ngx_pnalloc(r->pool, set_cookie->value.len);
@@ -987,16 +1009,20 @@ ngx_http_session_sticky_insert(ngx_http_request_t *r)
         p = ngx_cpymem(p, ctx->s_firstseen.data, ctx->s_firstseen.len);
     }
     if (ctx->sscf->domain.len) {
-        p = ngx_cpymem(p, ";Domain=", sizeof(";Domain=") - 1);
+        p = ngx_cpymem(p, "; Domain=", sizeof("; Domain=") - 1);
         p = ngx_cpymem(p, ctx->sscf->domain.data, ctx->sscf->domain.len);
     }
     if (ctx->sscf->path.len) {
-        p = ngx_cpymem(p, ";Path=", sizeof(";Path=") - 1);
+        p = ngx_cpymem(p, "; Path=", sizeof("; Path=") - 1);
         p = ngx_cpymem(p, ctx->sscf->path.data, ctx->sscf->path.len);
     }
     if (ctx->sscf->maxidle == NGX_CONF_UNSET && ctx->sscf->maxage.len) {
-        p = ngx_cpymem(p, ";Max-Age=", sizeof(";Max-Age=") - 1);
+        p = ngx_cpymem(p, "; Max-Age=", sizeof("; Max-Age=") - 1);
         p = ngx_cpymem(p, ctx->sscf->maxage.data, ctx->sscf->maxage.len);
+        p = ngx_cpymem(p, "; Expires=", sizeof("; Expires=") - 1);
+        ngx_uint_t maxage = ngx_atoi(ctx->sscf->maxage.data,
+                                      ctx->sscf->maxage.len);
+        p = ngx_http_cookie_time(p, ngx_time() + maxage);
     }
 
     set_cookie->value.len = p - set_cookie->value.data;
@@ -1379,3 +1405,57 @@ ngx_http_upstream_session_sticky_set_sid(ngx_conf_t *cf,
 
     return NGX_OK;
 }
+
+
+#if (NGX_HTTP_SSL)
+
+static ngx_int_t
+ngx_http_upstream_session_sticky_set_peer_session(ngx_peer_connection_t *pc,
+    void *data)
+{
+    ngx_http_upstream_ss_peer_data_t *sspd = data;
+
+    ngx_int_t            rc;
+    ngx_ssl_session_t   *ssl_session;
+
+    ssl_session = sspd->ssl_session;
+    rc = ngx_ssl_set_session(pc->connection, ssl_session);
+
+    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pc->log, 0,
+                   "set session: %p:%d",
+                   ssl_session, ssl_session ? ssl_session->references : 0);
+
+    return rc;
+}
+
+
+static void
+ngx_http_upstream_session_sticky_save_peer_session(ngx_peer_connection_t *pc,
+    void *data)
+{
+    ngx_http_upstream_ss_peer_data_t *sspd = data;
+
+    ngx_ssl_session_t   *old_ssl_session, *ssl_session;
+
+    ssl_session = ngx_ssl_get_session(pc->connection);
+
+    if (ssl_session == NULL) {
+        return;
+    }
+
+    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pc->log, 0,
+                   "save session: %p:%d", ssl_session, ssl_session->references);
+
+    old_ssl_session = sspd->ssl_session;
+    sspd->ssl_session = ssl_session;
+
+    if (old_ssl_session) {
+        ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pc->log, 0,
+                       "old session: %p:%d",
+                       old_ssl_session, old_ssl_session->references);
+
+        ngx_ssl_free_session(old_ssl_session);
+    }
+}
+
+#endif

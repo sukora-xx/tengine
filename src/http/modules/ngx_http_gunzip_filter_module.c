@@ -165,7 +165,7 @@ ngx_http_gunzip_header_filter(ngx_http_request_t *r)
 
     ngx_http_clear_content_length(r);
     ngx_http_clear_accept_ranges(r);
-    ngx_http_clear_etag(r);
+    ngx_http_weak_etag(r);
 
     return ngx_http_next_header_filter(r);
 }
@@ -175,6 +175,7 @@ static ngx_int_t
 ngx_http_gunzip_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 {
     int                     rc;
+    ngx_uint_t              flush;
     ngx_chain_t            *cl;
     ngx_http_gunzip_ctx_t  *ctx;
 
@@ -212,6 +213,10 @@ ngx_http_gunzip_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
         ngx_chain_update_chains(r->pool, &ctx->free, &ctx->busy, &cl,
                                 (ngx_buf_tag_t) &ngx_http_gunzip_filter_module);
         ctx->nomem = 0;
+        flush = 0;
+
+    } else {
+        flush = ctx->busy ? 1 : 0;
     }
 
     for ( ;; ) {
@@ -258,7 +263,7 @@ ngx_http_gunzip_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
             /* rc == NGX_AGAIN */
         }
 
-        if (ctx->out == NULL) {
+        if (ctx->out == NULL && !flush) {
             return ctx->busy ? NGX_AGAIN : NGX_OK;
         }
 
@@ -276,6 +281,7 @@ ngx_http_gunzip_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
                        "gunzip out: %p", ctx->out);
 
         ctx->nomem = 0;
+        flush = 0;
 
         if (ctx->done) {
             return rc;
@@ -422,7 +428,7 @@ ngx_http_gunzip_filter_inflate(ngx_http_request_t *r,
     rc = inflate(&ctx->zstream, ctx->flush);
 
     if (rc != Z_OK && rc != Z_STREAM_END && rc != Z_BUF_ERROR) {
-        ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                       "inflate() failed: %d, %d", ctx->flush, rc);
         return NGX_ERROR;
     }
@@ -500,9 +506,13 @@ ngx_http_gunzip_filter_inflate(ngx_http_request_t *r,
         return NGX_OK;
     }
 
-    if (rc == Z_STREAM_END && ctx->flush == Z_FINISH
-        && ctx->zstream.avail_in == 0)
-    {
+    if (ctx->flush == Z_FINISH && ctx->zstream.avail_in == 0) {
+
+        if (rc != Z_STREAM_END) {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "inflate() returned %d on response end", rc);
+            return NGX_ERROR;
+        }
 
         if (ngx_http_gunzip_filter_inflate_end(r, ctx) != NGX_OK) {
             return NGX_ERROR;

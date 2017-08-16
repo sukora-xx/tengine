@@ -139,7 +139,18 @@ static ngx_command_t  ngx_core_commands[] = {
       0,
       NULL },
 
-#if (NGX_THREADS)
+#if (NGX_FORCE_EXIT)
+
+    { ngx_string("force_exit"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_msec_slot,
+      0,
+      offsetof(ngx_core_conf_t, force_exit_time),
+      NULL },
+
+#endif
+
+#if (NGX_OLD_THREADS)
 
     { ngx_string("worker_threads"),
       NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
@@ -406,13 +417,8 @@ main(int argc, char *const *argv)
         return 1;
     }
 
-    if (cycle->log->file->fd != ngx_stderr) {
-
-        if (ngx_set_stderr(cycle->log->file->fd) == NGX_FILE_ERROR) {
-            ngx_log_error(NGX_LOG_EMERG, cycle->log, ngx_errno,
-                          ngx_set_stderr_n " failed");
-            return 1;
-        }
+    if (ngx_log_redirect_stderr(cycle) != NGX_OK) {
+        return 1;
     }
 
     if (log->file->fd != ngx_stderr) {
@@ -1003,7 +1009,11 @@ ngx_core_module_create_conf(ngx_cycle_t *cycle)
     ccf->user = (ngx_uid_t) NGX_CONF_UNSET_UINT;
     ccf->group = (ngx_gid_t) NGX_CONF_UNSET_UINT;
 
-#if (NGX_THREADS)
+#if (NGX_FORCE_EXIT)
+    ccf->force_exit_time = NGX_CONF_UNSET;
+#endif
+
+#if (NGX_OLD_THREADS)
     ccf->worker_threads = NGX_CONF_UNSET;
     ccf->thread_stack_size = NGX_CONF_UNSET_SIZE;
 #endif
@@ -1038,6 +1048,10 @@ ngx_core_module_init_conf(ngx_cycle_t *cycle, void *conf)
     ngx_conf_init_value(ccf->master, 1);
     ngx_conf_init_msec_value(ccf->timer_resolution, 0);
     ngx_conf_init_value(ccf->debug_points, 0);
+
+#if (NGX_FORCE_EXIT)
+    ngx_conf_init_value(ccf->force_exit_time, 0);
+#endif
 
 #if (NGX_HAVE_CPU_AFFINITY)
 
@@ -1089,7 +1103,7 @@ ngx_core_module_init_conf(ngx_cycle_t *cycle, void *conf)
 
 #endif
 
-#if (NGX_THREADS)
+#if (NGX_OLD_THREADS)
 
     ngx_conf_init_value(ccf->worker_threads, 0);
     ngx_threads_n = ccf->worker_threads;

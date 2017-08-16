@@ -9,17 +9,6 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
-#if (NGX_HTTP_SPDY && defined TLSEXT_TYPE_next_proto_neg)
-#include <ngx_http_spdy_module.h>
-#endif
-
-#if (NGX_HTTP_SPDY)
-#define NGX_HTTP_SPDY_CTL_MAGIC_NUM    0x80
-#define NGX_HTTP_SPDY_DATA_MAGIC_NUM   0x00
-
-static void ngx_http_spdy_detect(ngx_event_t *rev);
-#endif
-
 
 static void ngx_http_wait_request_handler(ngx_event_t *ev);
 static void ngx_http_process_request_line(ngx_event_t *rev);
@@ -323,13 +312,9 @@ ngx_http_init_connection(ngx_connection_t *c)
     rev->handler = ngx_http_wait_request_handler;
     c->write->handler = ngx_http_empty_handler;
 
-#if (NGX_HTTP_SPDY)
-    if (hc->addr_conf->spdy) {
-        rev->handler = ngx_http_spdy_init;
-    }
-
-    if (hc->addr_conf->spdy_detect) {
-        rev->handler = ngx_http_spdy_detect;
+#if (NGX_HTTP_V2)
+    if (hc->addr_conf->http2) {
+        rev->handler = ngx_http_v2_init;
     }
 #endif
 
@@ -358,6 +343,11 @@ ngx_http_init_connection(ngx_connection_t *c)
     }
 #endif
 
+    if (hc->addr_conf->proxy_protocol) {
+        hc->proxy_protocol = 1;
+        c->log->action = "reading PROXY protocol";
+    }
+
     if (rev->ready) {
         /* the deferred accept(), rtsig, aio, iocp */
 
@@ -380,104 +370,10 @@ ngx_http_init_connection(ngx_connection_t *c)
 }
 
 
-#if (NGX_HTTP_SPDY)
-static void
-ngx_http_spdy_detect(ngx_event_t *rev)
-{
-    int                  n;
-    u_char               buf[1];
-    ngx_err_t            err;
-    ngx_connection_t     *c;
-    ngx_http_connection_t *hc;
-
-    c = rev->data;
-    hc = c->data;
-
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, c->log, 0, "http spdy detect handler");
-
-    if (rev->timedout) {
-        ngx_log_error(NGX_LOG_INFO, c->log, NGX_ETIMEDOUT, "client timed out");
-        ngx_http_close_connection(c);
-        return;
-    }
-
-    if (c->close) {
-        ngx_http_close_connection(c);
-        return;
-    }
-
-    err = 0;
-    do {
-#if (NGX_HTTP_SSL)
-        if (hc->ssl) {
-            int sslerr;
-            n = SSL_peek(c->ssl->connection, buf, 1);
-            if (n < 0) {
-                sslerr = SSL_get_error(c->ssl->connection, n);
-                err = (sslerr == SSL_ERROR_SYSCALL) ? ngx_errno : 0;
-                if (sslerr == SSL_ERROR_WANT_READ) {
-                    err = NGX_EAGAIN;
-                }
-            }
-
-        } else {
-#endif
-        n = recv(c->fd, buf, 1, MSG_PEEK);
-        err = ngx_socket_errno;
-#if (NGX_HTTP_SSL)
-        }
-#endif
-
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, rev->log, err,
-                       "http spdy detect recv(): %d", n);
-
-        if (n > 0) {
-            if (*buf == NGX_HTTP_SPDY_CTL_MAGIC_NUM
-                || *buf == NGX_HTTP_SPDY_DATA_MAGIC_NUM)
-            {
-                rev->handler = ngx_http_spdy_init;
-
-            } else {
-                rev->handler = ngx_http_wait_request_handler;
-            }
-
-            rev->handler(rev);
-            return;
-        }
-
-        if (n < 0) {
-            if (err == NGX_EAGAIN) {
-                return;
-            }
-
-            if (err == NGX_EINTR) {
-                continue;
-            }
-
-            rev->error = 1;
-
-            break;
-
-        } else { /* n == 0 */
-            rev->eof = 1;
-            ngx_log_error(NGX_LOG_INFO, c->log, 0,
-                          "client closed connection");
-            break;
-        }
-
-    } while (1);
-
-    rev->ready = 0;
-    ngx_http_close_connection(c);
-
-    return;
-}
-#endif
-
-
 static void
 ngx_http_wait_request_handler(ngx_event_t *rev)
 {
+    u_char                    *p;
     size_t                     size;
     ssize_t                    n;
     ngx_buf_t                 *b;
@@ -533,20 +429,6 @@ ngx_http_wait_request_handler(ngx_event_t *rev)
 
     if (n == NGX_AGAIN) {
 
-#if (NGX_HAVE_DEFERRED_ACCEPT && defined TCP_DEFER_ACCEPT)
-        if (c->listening->deferred_accept
-#if (NGX_HTTP_SSL)
-            && c->ssl == NULL
-#endif
-            )
-        {
-            ngx_log_error(NGX_LOG_INFO, c->log, NGX_ETIMEDOUT,
-                          "client timed out in deferred accept");
-            ngx_http_close_connection(c);
-            return;
-        }
-#endif
-
         if (!rev->timer_set) {
             ngx_add_timer(rev, c->listening->post_accept_timeout);
             ngx_reusable_connection(c, 1);
@@ -581,6 +463,28 @@ ngx_http_wait_request_handler(ngx_event_t *rev)
     }
 
     b->last += n;
+    c->received += n;
+
+    if (hc->proxy_protocol) {
+        hc->proxy_protocol = 0;
+
+        p = ngx_proxy_protocol_parse(c, b->pos, b->last);
+
+        if (p == NULL) {
+            ngx_http_close_connection(c);
+            return;
+        }
+
+        b->pos = p;
+
+        if (b->pos == b->last) {
+            c->log->action = "waiting for request";
+            b->pos = b->start;
+            b->last = b->start;
+            ngx_post_event(rev, &ngx_posted_events);
+            return;
+        }
+    }
 
     c->log->action = "reading client request line";
 
@@ -693,8 +597,7 @@ ngx_http_create_request(ngx_connection_t *c)
     }
 
     r->method = NGX_HTTP_UNKNOWN;
-
-    r->request_buffering = 1;
+    r->http_version = NGX_HTTP_VERSION_10;
 
     r->headers_in.content_length_n = -1;
     r->headers_in.keep_alive_n = -1;
@@ -726,7 +629,8 @@ ngx_http_create_request(ngx_connection_t *c)
 static void
 ngx_http_ssl_handshake(ngx_event_t *rev)
 {
-    u_char                    buf[1];
+    u_char                   *p, buf[NGX_PROXY_PROTOCOL_MAX_HEADER + 1];
+    size_t                    size;
     ssize_t                   n;
     ngx_err_t                 err;
     ngx_int_t                 rc;
@@ -735,6 +639,7 @@ ngx_http_ssl_handshake(ngx_event_t *rev)
     ngx_http_ssl_srv_conf_t  *sscf;
 
     c = rev->data;
+    hc = c->data;
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, rev->log, 0,
                    "http check ssl handshake");
@@ -750,7 +655,9 @@ ngx_http_ssl_handshake(ngx_event_t *rev)
         return;
     }
 
-    n = recv(c->fd, (char *) buf, 1, MSG_PEEK);
+    size = hc->proxy_protocol ? sizeof(buf) : 1;
+
+    n = recv(c->fd, (char *) buf, size, MSG_PEEK);
 
     err = ngx_socket_errno;
 
@@ -758,15 +665,7 @@ ngx_http_ssl_handshake(ngx_event_t *rev)
 
     if (n == -1) {
         if (err == NGX_EAGAIN) {
-
-#if (NGX_HAVE_DEFERRED_ACCEPT && defined TCP_DEFER_ACCEPT)
-            if (c->listening->deferred_accept) {
-                ngx_log_error(NGX_LOG_INFO, c->log, NGX_ETIMEDOUT,
-                              "client timed out in deferred accept");
-                ngx_http_close_connection(c);
-                return;
-            }
-#endif
+            rev->ready = 0;
 
             if (!rev->timer_set) {
                 ngx_add_timer(rev, c->listening->post_accept_timeout);
@@ -786,12 +685,39 @@ ngx_http_ssl_handshake(ngx_event_t *rev)
         return;
     }
 
+    if (hc->proxy_protocol) {
+        hc->proxy_protocol = 0;
+
+        p = ngx_proxy_protocol_parse(c, buf, buf + n);
+
+        if (p == NULL) {
+            ngx_http_close_connection(c);
+            return;
+        }
+
+        size = p - buf;
+
+        if (c->recv(c, buf, size) != (ssize_t) size) {
+            ngx_http_close_connection(c);
+            return;
+        }
+
+        c->log->action = "SSL handshaking";
+
+        if (n == (ssize_t) size) {
+            ngx_post_event(rev, &ngx_posted_events);
+            return;
+        }
+
+        n = 1;
+        buf[0] = *p;
+    }
+
     if (n == 1) {
         if (buf[0] & 0x80 /* SSLv2 */ || buf[0] == 0x16 /* SSLv3/TLSv1 */) {
             ngx_log_debug1(NGX_LOG_DEBUG_HTTP, rev->log, 0,
                            "https ssl handshake: 0x%02Xd", buf[0]);
 
-            hc = c->data;
             sscf = ngx_http_get_module_srv_conf(hc->conf_ctx,
                                                 ngx_http_ssl_module);
 
@@ -851,40 +777,35 @@ ngx_http_ssl_handshake_handler(ngx_connection_t *c)
 
         c->ssl->no_wait_shutdown = 1;
 
-#if (NGX_HTTP_SPDY)
+#if (NGX_HTTP_V2                                                              \
+     && (defined TLSEXT_TYPE_application_layer_protocol_negotiation           \
+         || defined TLSEXT_TYPE_next_proto_neg))
         {
-            ngx_http_connection_t     *hc = c->data;
-
-            if (hc->addr_conf->spdy_detect) {
-                c->read->handler = ngx_http_spdy_detect;
-                ngx_http_spdy_detect(c->read);
-                return;
-            }
-        }
-#endif
-
-#if (NGX_HTTP_SPDY && defined TLSEXT_TYPE_next_proto_neg)
-        {
-        ngx_http_connection_t       *hc;
-        ngx_http_spdy_srv_conf_t    *sscf;
-        unsigned int                 len;
-        const unsigned char         *data;
-        ngx_str_t                    spdy;
+        unsigned int            len;
+        const unsigned char    *data;
+        ngx_http_connection_t  *hc;
 
         hc = c->data;
-        sscf = ngx_http_get_module_srv_conf(hc->conf_ctx, ngx_http_spdy_module);
 
-        if (sscf->version == NGX_SPDY_VERSION_V3) {
-            ngx_str_set(&spdy, NGX_SPDY_V3_NPN_NEGOTIATED);
-        } else {
-            ngx_str_set(&spdy, NGX_SPDY_NPN_NEGOTIATED);
-        }
+        if (hc->addr_conf->http2) {
 
-        SSL_get0_next_proto_negotiated(c->ssl->connection, &data, &len);
+#ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
+            SSL_get0_alpn_selected(c->ssl->connection, &data, &len);
 
-        if (len == spdy.len && ngx_strncmp(data, spdy.data, spdy.len) == 0) {
-            ngx_http_spdy_init(c->read);
-            return;
+#ifdef TLSEXT_TYPE_next_proto_neg
+            if (len == 0) {
+                SSL_get0_next_proto_negotiated(c->ssl->connection, &data, &len);
+            }
+#endif
+
+#else /* TLSEXT_TYPE_next_proto_neg */
+            SSL_get0_next_proto_negotiated(c->ssl->connection, &data, &len);
+#endif
+
+            if (len == 2 && data[0] == 'h' && data[1] == '2') {
+                ngx_http_v2_init(c->read);
+                return;
+            }
         }
         }
 #endif
@@ -1169,6 +1090,8 @@ ngx_http_process_request_uri(ngx_http_request_t *r)
         cscf = ngx_http_get_module_srv_conf(r, ngx_http_core_module);
 
         if (ngx_http_parse_complex_uri(r, cscf->merge_slashes) != NGX_OK) {
+            r->uri.len = 0;
+
             ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                           "client sent invalid request");
             ngx_http_finalize_request(r, NGX_HTTP_BAD_REQUEST);
@@ -1335,7 +1258,7 @@ ngx_http_process_request_headers(ngx_event_t *rev)
                     }
 
                     ngx_log_error(NGX_LOG_INFO, c->log, 0,
-                                  "client sent too long header line: \"%*s\"",
+                                  "client sent too long header line: \"%*s...\"",
                                   len, r->header_name_start);
 
                     ngx_http_finalize_request(r,
@@ -1510,6 +1433,7 @@ ngx_http_read_request_header(ngx_http_request_t *r)
     }
 
     r->header_in->last += n;
+    c->received += n;
 
     return n;
 }
@@ -2108,6 +2032,10 @@ ngx_http_set_virtual_server(ngx_http_request_t *r, ngx_str_t *host)
     ngx_http_core_loc_conf_t  *clcf;
     ngx_http_core_srv_conf_t  *cscf;
 
+#if (NGX_SUPPRESS_WARN)
+    cscf = NULL;
+#endif
+
     hc = r->http_connection;
 
 #if (NGX_HTTP_SSL && defined SSL_CTRL_SET_TLSEXT_HOSTNAME)
@@ -2157,7 +2085,7 @@ ngx_http_set_virtual_server(ngx_http_request_t *r, ngx_str_t *host)
             ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                           "client attempted to request the server name "
                           "different from that one was negotiated");
-            ngx_http_finalize_request(r, NGX_HTTP_BAD_REQUEST);
+            ngx_http_finalize_request(r, NGX_HTTP_MISDIRECTED_REQUEST);
             return NGX_ERROR;
         }
     }
@@ -2270,13 +2198,11 @@ ngx_http_request_handler(ngx_event_t *ev)
 {
     ngx_connection_t    *c;
     ngx_http_request_t  *r;
-    ngx_http_log_ctx_t  *ctx;
 
     c = ev->data;
     r = c->data;
 
-    ctx = c->log->data;
-    ctx->current_request = r;
+    ngx_http_set_log_request(c->log, r);
 
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, c->log, 0,
                    "http run request: \"%V?%V\"", &r->uri, &r->args);
@@ -2296,7 +2222,6 @@ void
 ngx_http_run_posted_requests(ngx_connection_t *c)
 {
     ngx_http_request_t         *r;
-    ngx_http_log_ctx_t         *ctx;
     ngx_http_posted_request_t  *pr;
 
     for ( ;; ) {
@@ -2316,8 +2241,7 @@ ngx_http_run_posted_requests(ngx_connection_t *c)
 
         r = pr->request;
 
-        ctx = c->log->data;
-        ctx->current_request = r;
+        ngx_http_set_log_request(c->log, r);
 
         ngx_log_debug2(NGX_LOG_DEBUG_HTTP, c->log, 0,
                        "http posted request: \"%V?%V\"", &r->uri, &r->args);
@@ -2604,8 +2528,8 @@ ngx_http_finalize_connection(ngx_http_request_t *r)
 {
     ngx_http_core_loc_conf_t  *clcf;
 
-#if (NGX_HTTP_SPDY)
-    if (r->spdy_stream) {
+#if (NGX_HTTP_V2)
+    if (r->stream) {
         ngx_http_close_request(r, 0);
         return;
     }
@@ -2627,6 +2551,11 @@ ngx_http_finalize_connection(ngx_http_request_t *r)
 
         ngx_http_close_request(r, 0);
         return;
+    }
+
+    if (r->reading_body) {
+        r->keepalive = 0;
+        r->lingering_close = 1;
     }
 
     if (!ngx_terminate
@@ -2664,12 +2593,6 @@ ngx_http_set_write_handler(ngx_http_request_t *r)
                                 ngx_http_discarded_request_body_handler:
                                 ngx_http_test_reading;
     r->write_event_handler = ngx_http_writer;
-
-#if (NGX_HTTP_SPDY)
-    if (r->spdy_stream) {
-        return NGX_OK;
-    }
-#endif
 
     wev = r->connection->write;
 
@@ -2818,9 +2741,9 @@ ngx_http_test_reading(ngx_http_request_t *r)
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, c->log, 0, "http test reading");
 
-#if (NGX_HTTP_SPDY)
+#if (NGX_HTTP_V2)
 
-    if (r->spdy_stream) {
+    if (r->stream) {
         if (c->error) {
             err = 0;
             goto closed;
@@ -2842,6 +2765,33 @@ ngx_http_test_reading(ngx_http_request_t *r)
         rev->eof = 1;
         c->error = 1;
         err = rev->kq_errno;
+
+        goto closed;
+    }
+
+#endif
+
+#if (NGX_HAVE_EPOLLRDHUP)
+
+    if ((ngx_event_flags & NGX_USE_EPOLL_EVENT) && rev->pending_eof) {
+        socklen_t  len;
+
+        rev->eof = 1;
+        c->error = 1;
+
+        err = 0;
+        len = sizeof(ngx_err_t);
+
+        /*
+         * BSDs and Linux return 0 and set a pending error in err
+         * Solaris returns -1 and sets errno
+         */
+
+        if (getsockopt(c->fd, SOL_SOCKET, SO_ERROR, (void *) &err, &len)
+            == -1)
+        {
+            err = ngx_socket_errno;
+        }
 
         goto closed;
     }
@@ -2888,7 +2838,7 @@ closed:
     ngx_log_error(NGX_LOG_INFO, c->log, err,
                   "client prematurely closed connection");
 
-    ngx_http_finalize_request(r, 0);
+    ngx_http_finalize_request(r, NGX_HTTP_CLIENT_CLOSED_REQUEST);
 }
 
 
@@ -2993,6 +2943,10 @@ ngx_http_set_keepalive(ngx_http_request_t *r)
         c->data = r;
 
         c->sent = 0;
+
+        /* bytes in the buffer have already been counted */
+        c->received = 0;
+
         c->destroyed = 0;
 
         if (rev->timer_set) {
@@ -3246,6 +3200,7 @@ ngx_http_keepalive_handler(ngx_event_t *rev)
     }
 
     c->sent = 0;
+    c->received = n;
     c->destroyed = 0;
 
     ngx_del_timer(rev);
@@ -3321,8 +3276,8 @@ ngx_http_lingering_close_handler(ngx_event_t *rev)
         return;
     }
 
-    timer = (ngx_msec_t) (r->lingering_time - ngx_time());
-    if (timer <= 0) {
+    timer = (ngx_msec_t) r->lingering_time - (ngx_msec_t) ngx_time();
+    if ((ngx_msec_int_t) timer <= 0) {
         ngx_http_close_request(r, 0);
         return;
     }
@@ -3336,6 +3291,8 @@ ngx_http_lingering_close_handler(ngx_event_t *rev)
             ngx_http_close_request(r, 0);
             return;
         }
+
+        c->received += n;
 
     } while (rev->ready);
 
@@ -3466,9 +3423,9 @@ ngx_http_close_request(ngx_http_request_t *r, ngx_int_t rc)
         return;
     }
 
-#if (NGX_HTTP_SPDY)
-    if (r->spdy_stream) {
-        ngx_http_spdy_close_stream(r->spdy_stream, rc);
+#if (NGX_HTTP_V2)
+    if (r->stream) {
+        ngx_http_v2_close_stream(r->stream, rc);
         return;
     }
 #endif
@@ -3497,10 +3454,15 @@ ngx_http_free_request(ngx_http_request_t *r, ngx_int_t rc)
         return;
     }
 
-    for (cln = r->cleanup; cln; cln = cln->next) {
+    cln = r->cleanup;
+    r->cleanup = NULL;
+
+    while (cln) {
         if (cln->handler) {
             cln->handler(cln->data);
         }
+
+        cln = cln->next;
     }
 
 #if (NGX_STAT_STUB)

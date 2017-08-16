@@ -68,7 +68,7 @@ static ngx_str_t ngx_http_status_lines[] = {
     /* ngx_null_string, */  /* "300 Multiple Choices" */
 
     ngx_string("301 Moved Permanently"),
-    ngx_string("302 Found"),
+    ngx_string("302 Moved Temporarily"),
     ngx_string("303 See Other"),
     ngx_string("304 Not Modified"),
     ngx_null_string,  /* "305 Use Proxy" */
@@ -83,7 +83,7 @@ static ngx_str_t ngx_http_status_lines[] = {
     ngx_string("402 Payment Required"),
     ngx_string("403 Forbidden"),
     ngx_string("404 Not Found"),
-    ngx_string("405 Method Not Allowed"),
+    ngx_string("405 Not Allowed"),
     ngx_string("406 Not Acceptable"),
     ngx_null_string,  /* "407 Proxy Authentication Required" */
     ngx_string("408 Request Time-out"),
@@ -92,23 +92,20 @@ static ngx_str_t ngx_http_status_lines[] = {
     ngx_string("411 Length Required"),
     ngx_string("412 Precondition Failed"),
     ngx_string("413 Request Entity Too Large"),
-    ngx_null_string,  /* "414 Request-URI Too Large", but we never send it
-                       * because we treat such requests as the HTTP/0.9
-                       * requests and send only a body without a header
-                       */
+    ngx_string("414 Request-URI Too Large"),
     ngx_string("415 Unsupported Media Type"),
     ngx_string("416 Requested Range Not Satisfiable"),
+    ngx_null_string,  /* "417 Expectation Failed" */
+    ngx_null_string,  /* "418 unused" */
+    ngx_null_string,  /* "419 unused" */
+    ngx_null_string,  /* "420 unused" */
+    ngx_string("421 Misdirected Request"),
 
-    /* ngx_null_string, */  /* "417 Expectation Failed" */
-    /* ngx_null_string, */  /* "418 unused" */
-    /* ngx_null_string, */  /* "419 unused" */
-    /* ngx_null_string, */  /* "420 unused" */
-    /* ngx_null_string, */  /* "421 unused" */
     /* ngx_null_string, */  /* "422 Unprocessable Entity" */
     /* ngx_null_string, */  /* "423 Locked" */
     /* ngx_null_string, */  /* "424 Failed Dependency" */
 
-#define NGX_HTTP_LAST_4XX  417
+#define NGX_HTTP_LAST_4XX  422
 #define NGX_HTTP_OFF_5XX   (NGX_HTTP_LAST_4XX - 400 + NGX_HTTP_OFF_4XX)
 
     ngx_string("500 Internal Server Error"),
@@ -116,10 +113,10 @@ static ngx_str_t ngx_http_status_lines[] = {
     ngx_string("502 Bad Gateway"),
     ngx_string("503 Service Temporarily Unavailable"),
     ngx_string("504 Gateway Time-out"),
-
     ngx_null_string,        /* "505 HTTP Version Not Supported" */
     ngx_null_string,        /* "506 Variant Also Negotiates" */
     ngx_string("507 Insufficient Storage"),
+
     /* ngx_null_string, */  /* "508 unused" */
     /* ngx_null_string, */  /* "509 unused" */
     /* ngx_null_string, */  /* "510 Not Extended" */
@@ -267,7 +264,13 @@ ngx_http_header_filter(ngx_http_request_t *r)
             len += ngx_http_status_lines[status].len;
 
         } else {
-            len += NGX_INT_T_LEN;
+            len += NGX_INT_T_LEN + 1 /* SP */;
+            status_line = NULL;
+        }
+
+        if (status_line && status_line->len == 0) {
+            status = r->headers_out.status;
+            len += NGX_INT_T_LEN + 1 /* SP */;
             status_line = NULL;
         }
     }
@@ -277,9 +280,8 @@ ngx_http_header_filter(ngx_http_request_t *r)
     if (r->headers_out.server == NULL) {
 
         if (clcf->server_tag_type == NGX_HTTP_SERVER_TAG_ON) {
-            len += clcf->server_tokens
-                ? sizeof(ngx_http_server_full_string) - 1
-                : sizeof(ngx_http_server_string) - 1;
+            len += clcf->server_tokens ? sizeof(ngx_http_server_full_string) - 1: 
+                                         sizeof(ngx_http_server_string) - 1;
 
         } else if (clcf->server_tag_type == NGX_HTTP_SERVER_TAG_CUSTOMIZED) {
             len += clcf->server_tag_header.len;
@@ -455,7 +457,7 @@ ngx_http_header_filter(ngx_http_request_t *r)
         b->last = ngx_copy(b->last, status_line->data, status_line->len);
 
     } else {
-        b->last = ngx_sprintf(b->last, "%03ui", status);
+        b->last = ngx_sprintf(b->last, "%03ui ", status);
     }
     *b->last++ = CR; *b->last++ = LF;
 
